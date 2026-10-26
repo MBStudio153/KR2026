@@ -1,1 +1,67 @@
+name: autoimmune-data1
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: CDC WONDER autoimmune disease deaths by ICD-10 group
+        continue-on-error: true
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import re, json, time, urllib.request, urllib.parse
+          GROUPS = {
+            "rheumatoid_arthritis": "M05-M06", "lupus_sle": "M32", "multiple_sclerosis": "G35",
+            "type1_diabetes": "E10", "crohn_colitis": "K50-K51", "psoriasis": "L40",
+            "celiac": "K90.0", "thyroiditis_graves": "E05.0,E06.3", "myasthenia_gravis": "G70.0",
+            "systemic_sclerosis": "M34", "sjogren": "M35.0", "vasculitis": "M30-M31",
+            "all_autoimmune_core": "M05-M06,M32,G35,E10,K50-K51,L40,M34,M30-M31",
+          }
+          DBS = ["D76", "D158"]
+          log = open("out/log.txt", "w")
+          def p(name, vals):
+              return "<parameter><name>%s</name>%s</parameter>" % (name, "".join("<value>%s</value>" % v for v in vals))
+          def build(db, codes, title):
+              ps = [p("accept_datause_restrictions", ["true"]), p("B_1", [db + ".V1-level1"]),
+                    p("B_2", ["*None*"]), p("B_3", ["*None*"]), p("B_4", ["*None*"]), p("B_5", ["*None*"]),
+                    p("M_1", [db + ".M1"]), p("M_2", [db + ".M2"]), p("M_3", [db + ".M3"]),
+                    p("V_" + db + ".V2", codes.split(",")), p("O_javascript", ["off"]), p("O_title", [title]),
+                    p("O_precision", ["2"]), p("O_rate_per", ["100000"]), p("O_show_totals", ["true"]),
+                    p("O_show_zeros", ["true"]), p("O_show_suppressed", ["true"]), p("O_ucd", [db + ".V2"]),
+                    p("O_V2_fmode", ["freg"]), p("action-Send", ["Send"])]
+              return "<request-parameters>" + "".join(ps) + "</request-parameters>"
+          for db in DBS:
+              for k, codes in GROUPS.items():
+                  url = "https://wonder.cdc.gov/controller/datarequest/" + db
+                  body = urllib.parse.urlencode({"request_xml": build(db, codes, k), "accept_datause_restrictions": "true"}).encode()
+                  try:
+                      r = urllib.request.urlopen(urllib.request.Request(url, data=body, headers={"User-Agent": "kaim-research/1.0"}), timeout=120).read().decode("utf-8", "replace")
+                      open("out/%s_%s.xml" % (db, k), "w").write(r)
+                      rows = [re.findall(r'<c (?:[vl]|r)="([^"]*)"', x) for x in re.findall(r"<r>(.*?)</r>", r, re.S)]
+                      json.dump(rows, open("out/%s_%s.json" % (db, k), "w"))
+                      log.write("%s %s OK rows=%d first=%s\n" % (db, k, len(rows), rows[:2]))
+                  except Exception as e:
+                      log.write("%s %s FAILED %s\n" % (db, k, repr(e)[:200]))
+                  log.flush(); time.sleep(8)
+          log.close()
+          PY
+          python3 q.py
+          cat out/log.txt
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/autoimmune-data1.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/autoimmune-data1.zip
+          git commit -m "Fetch autoimmune-data1" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: autoimmune-data1
+          path: out/
 
