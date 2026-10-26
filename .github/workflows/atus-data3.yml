@@ -1,1 +1,70 @@
+name: atus-data3
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: ATUS work, TV and participation series, all groups
+        continue-on-error: true
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import time, urllib.request
+          UA = {"User-Agent": "KAIM Research info@kaimresearch.com", "Accept-Encoding": "identity"}
+          log = open("out/log.txt", "w")
+          base = "https://download.bls.gov/pub/time.series/tu/"
+          def get(name):
+              err = ""
+              for a in range(3):
+                  try:
+                      return urllib.request.urlopen(urllib.request.Request(base + name, headers=UA), timeout=600)
+                  except Exception as e:
+                      err = repr(e)[:120]; time.sleep(8 * (a + 1))
+              log.write("%s ERROR %s\n" % (name, err)); log.flush(); return None
+          # keep series for: hours for participants (20101), percent engaged (30105), and total hours (10101) for ALL population groups
+          KEEP = (b"TUU10101", b"TUU20101", b"TUU30105")
+          ids = set()
+          r = get("tu.series")
+          if r:
+              first = True
+              with open("out/tu.series.kept", "wb") as f:
+                  for line in r:
+                      if first or line.startswith(KEEP):
+                          f.write(line)
+                          if not first: ids.add(line.split(b"\t")[0].strip())
+                          first = False
+              log.write("series kept %d\n" % len(ids)); log.flush()
+          r = get("tu.data.1.AllData")
+          if r:
+              n = 0
+              with open("out/tu.data.kept", "wb") as f:
+                  for line in r:
+                      if n == 0 or line.split(b"\t")[0].strip() in ids:
+                          f.write(line)
+                      n += 1
+              log.write("data lines read %d\n" % n)
+          for n in ["tu.actcode", "tu.stattype", "tu.sex", "tu.lfstat", "tu.pertype", "tu.datays", "tu.footnote"]:
+              r = get(n)
+              if r: open("out/" + n, "wb").write(r.read())
+          log.close()
+          PY
+          python3 q.py
+          cat out/log.txt
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/atus-data3.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/atus-data3.zip
+          git commit -m "Fetch atus-data3" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: atus-data3
+          path: out/
 
