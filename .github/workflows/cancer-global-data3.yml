@@ -1,1 +1,67 @@
+name: cancer-global-data1
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: WHO GHO, OWID and IARC cancer data
+        continue-on-error: true
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import json, re, time, urllib.request, urllib.parse
+          UA = {"User-Agent": "KAIM Research info@kaimresearch.com"}
+          log = open("out/log.txt", "w")
+          def get(url, tries=3, timeout=180):
+              err = ""
+              for a in range(tries):
+                  try:
+                      return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout).read()
+                  except Exception as e:
+                      err = repr(e)[:150]; time.sleep(10 * (a + 1))
+              log.write("ERROR %s %s\n" % (url, err)); log.flush(); return None
+          # 1. WHO Global Health Observatory: find cancer and autoimmune related indicators, then pull each (country and year)
+          for host in ["https://ghoapi.azureedge.net/api/", "https://ghoapi.who.int/api/"]:
+              d = get(host + "Indicator")
+              if d: break
+          codes = []
+          if d:
+              ind = json.loads(d)["value"]
+              json.dump(ind, open("out/gho_indicators.json", "w"))
+              pat = re.compile(r"cancer|neoplasm|tumou?r|leukaemia|lymphoma|mortality rate.*(cancer|neoplasm)|noncommunicable|premature mortality", re.I)
+              codes = [(i["IndicatorCode"], i["IndicatorName"]) for i in ind if pat.search(i["IndicatorName"])][:40]
+              log.write("matched %d indicators\n" % len(codes))
+              for c, n in codes:
+                  r = get(host + urllib.parse.quote(c))
+                  if r: open("out/gho_%s.json" % c, "wb").write(r); log.write("%s %s len=%d\n" % (c, n, len(r)))
+                  log.flush(); time.sleep(2)
+          # 2. Our World in Data grapher CSVs (IHME Global Burden of Disease and WHO mortality database)
+          for slug in ["cancer-death-rates", "total-cancer-deaths-by-type", "cancer-deaths-rate-and-age-standardized-rate-index", "share-of-deaths-from-cancer"]:
+              r = get("https://ourworldindata.org/grapher/%s.csv?v=1&csvType=full&useColumnShortNames=true" % slug)
+              if r: open("out/owid_%s.csv" % slug, "wb").write(r); log.write("owid %s len=%d\n" % (slug, len(r)))
+              log.flush(); time.sleep(3)
+          # 3. IARC Global Cancer Observatory (GCO) static data download index
+          r = get("https://gco.iarc.fr/today/en")
+          if r: open("out/gco_home.html", "wb").write(r); log.write("gco home len=%d\n" % len(r))
+          log.close()
+          PY
+          python3 q.py
+          cat out/log.txt
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/cancer-global-data1.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/cancer-global-data1.zip
+          git commit -m "Fetch cancer-global-data1" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cancer-global-data1
+          path: out/
 
