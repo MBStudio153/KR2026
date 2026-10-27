@@ -1,1 +1,51 @@
+name: shelter-wb-data1
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: "World Bank shelter indicators: slums, density, water, sanitation, refugees, IDPs"
+        continue-on-error: true
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import json, time, os, requests
+          S=requests.Session(); S.headers["User-Agent"]="KAIM Research LLC research contact info@example.com"
+          IND={"EN.POP.SLUM.UR.ZS":"population living in slums, % of urban population","SP.URB.TOTL.IN.ZS":"urban population, % of total","EN.POP.DNST":"population density, people per sq. km of land area","SP.POP.TOTL":"population","SH.H2O.BASW.ZS":"people using at least basic drinking water services, %","SH.STA.BASS.ZS":"people using at least basic sanitation services, %","EG.ELC.ACCS.ZS":"access to electricity, % of population","SM.POP.REFG":"refugee population by country or territory of asylum","SM.POP.REFG.OR":"refugee population by country or territory of origin","VC.IDP.TOCV":"internally displaced persons, total displaced by conflict and violence","VC.IDP.NWCV":"new displacements associated with conflict and violence","VC.IDP.NWDS":"new displacements associated with disasters"}
+          M={"ok":[],"failed":[]}; os.makedirs("out/wb",exist_ok=True)
+          for code,label in IND.items():
+              rows=[]
+              try:
+                  page=1
+                  while True:
+                      r=S.get("https://api.worldbank.org/v2/country/all/indicator/%s"%code,params={"format":"json","per_page":20000,"date":"1960:2026","page":page},timeout=120); j=r.json()
+                      if not isinstance(j,list) or len(j)<2 or j[1] is None: break
+                      rows+=[{"iso3":x["countryiso3code"],"country":x["country"]["value"],"year":x["date"],"value":x["value"]} for x in j[1] if x["value"] is not None]
+                      if page>=j[0].get("pages",1): break
+                      page+=1
+                  json.dump({"code":code,"label":label,"rows":rows},open("out/wb/%s.json"%code,"w")); M["ok"].append({"code":code,"rows":len(rows)})
+              except Exception as e: M["failed"].append({"code":code,"error":repr(e)[:200]})
+              time.sleep(1)
+          json.dump(M,open("out/wb_manifest.json","w"),indent=1)
+          open("out/log.txt","w").write(json.dumps(M)[:3000])
+          PY
+          python3 q.py
+          head -60 out/log.txt
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/shelter-wb-data1.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/shelter-wb-data1.zip
+          git commit -m "Fetch shelter-wb-data1" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shelter-wb-data1
+          path: out/
 
