@@ -1,1 +1,60 @@
+name: cancer-global-data2
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - batch: 'gho'
+          - batch: 'owid'
+    steps:
+      - name: WHO GHO and Our World in Data cancer and diabetes series
+        continue-on-error: true
+        env:
+          BATCH: ${{ matrix.batch }}
+        run: |
+          mkdir -p out
+          cat > q.py <<'PY'
+          import os, time, urllib.request
+          UA = {"User-Agent": "Mozilla/5.0 (compatible; KAIM Research info@kaimresearch.com)", "Accept": "application/json,text/csv,*/*"}
+          log = open("out/log.txt", "w")
+          def get(url, tries=2, timeout=120):
+              err = ""
+              for a in range(tries):
+                  try:
+                      return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout).read()
+                  except Exception as e:
+                      err = repr(e)[:140]; time.sleep(5)
+              log.write("ERROR %s %s\n" % (url, err)); log.flush(); return None
+          if os.environ["BATCH"] == "gho":
+              CODES = ["WHS2_160", "SA_0000001807", "SA_0000001438", "SA_0000001439", "SA_0000001445", "SA_0000001448", "SA_0000001449",
+                       "SA_0000001440", "NCDMORT3070", "NCD_DIABETES_PREVALENCE_AGESTD", "CANCERSURVIVAL_BREASTCANCER", "CANCERSURVIVAL_CHILDREN_LEUKAEMIA"]
+              for c in CODES:
+                  r = None
+                  for host in ["https://ghoapi.who.int/api/", "https://ghoapi.azureedge.net/api/"]:
+                      r = get(host + c)
+                      if r: break
+                  if r:
+                      open("out/gho_%s.json" % c, "wb").write(r); log.write("%s ok len=%d\n" % (c, len(r)))
+                  log.flush(); time.sleep(2)
+          else:
+              for slug in ["cancer-death-rates", "total-cancer-deaths-by-type", "share-of-deaths-from-cancer", "cancer-deaths-rate-and-age-standardized-rate-index"]:
+                  r = get("https://ourworldindata.org/grapher/%s.csv?v=1&csvType=full&useColumnShortNames=true" % slug)
+                  if r: open("out/owid_%s.csv" % slug, "wb").write(r); log.write("owid %s ok len=%d\n" % (slug, len(r)))
+                  log.flush(); time.sleep(3)
+          log.close()
+          PY
+          python3 q.py
+          cat out/log.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cancer-global2-${{ matrix.batch }}
+          path: out/
 
