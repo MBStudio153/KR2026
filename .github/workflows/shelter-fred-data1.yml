@@ -1,1 +1,61 @@
+name: shelter-fred-data1
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: "FRED mortgage delinquency and charge-off, homeownership, vacancy, households, population"
+        continue-on-error: true
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import os, json, time, requests
+          key=(os.environ.get("FRED_API_KEY") or "").strip()
+          log=open("out/log.txt","w")
+          S={"DRSFRMACBS":"Delinquency rate, single-family residential mortgages, all commercial banks, seasonally adjusted, quarterly",
+          "DRSFRMACBN":"Delinquency rate, single-family residential mortgages, all commercial banks, not seasonally adjusted, quarterly",
+          "CORSFRMACBS":"Charge-off rate, single-family residential mortgages, all commercial banks, seasonally adjusted, quarterly",
+          "RHORUSQ156N":"Homeownership rate, United States, quarterly",
+          "RRVRUSQ156N":"Rental vacancy rate, United States, quarterly",
+          "RHVRUSQ156N":"Homeowner vacancy rate, United States, quarterly",
+          "TTLHH":"Total households, thousands, annual",
+          "POP":"Population, thousands, monthly",
+          "MSPUS":"Median sales price of houses sold, quarterly",
+          "MEHOINUSA672N":"Real median household income, annual"}
+          out={}
+          for sid,label in S.items():
+              for a in range(3):
+                  try:
+                      r=requests.get("https://api.stlouisfed.org/fred/series/observations",params={"series_id":sid,"api_key":key,"file_type":"json","observation_start":"1900-01-01"},timeout=60)
+                      if r.status_code==200:
+                          out[sid]={"label":label,"observations":[[o["date"],o["value"]] for o in r.json().get("observations",[])]}; log.write("ok %s %d\n"%(sid,len(out[sid]["observations"]))); break
+                      log.write("%s HTTP %d %s\n"%(sid,r.status_code,r.text[:80]))
+                      if r.status_code==400: break
+                  except Exception as e: log.write("%s %s\n"%(sid,repr(e)[:100]))
+                  time.sleep(5)
+              time.sleep(0.6)
+          json.dump(out,open("out/fred_shelter.json","w"))
+          log.close()
+          PY
+          python3 q.py
+          head -60 out/log.txt
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/shelter-fred-data1.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/shelter-fred-data1.zip
+          git commit -m "Fetch shelter-fred-data1" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shelter-fred-data1
+          path: out/
 
