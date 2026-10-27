@@ -1,1 +1,73 @@
+name: pestilence-wb-data1
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: World Bank disease, immunization and mortality indicators, all countries and aggregates
+        continue-on-error: true
+        run: |
+          mkdir -p out/wb data/zips
+          python3 - <<'PY'
+          import json, time, requests
+          S = requests.Session()
+          S.headers["User-Agent"] = "KAIM Research LLC research contact info@example.com"
+          IND = {
+            "SH.MLR.INCD.P3": "malaria incidence, per 1,000 population at risk",
+            "SH.MLR.NETS.ZS": "children under 5 sleeping under insecticide-treated nets, %",
+            "SH.HIV.INCD.TL.P3": "HIV incidence, per 1,000 uninfected population",
+            "SH.DYN.AIDS.DH": "AIDS-related deaths",
+            "SH.TBS.INCD": "tuberculosis incidence, per 100,000 people",
+            "SH.TBS.DTEC.ZS": "tuberculosis case detection rate, %",
+            "SH.IMM.MEAS": "immunization, measles, % of children 12-23 months",
+            "SH.IMM.IDPT": "immunization, DPT, % of children 12-23 months",
+            "SH.DTH.COMM.ZS": "cause of death, communicable, maternal, perinatal and nutritional, % of total",
+            "SH.DTH.NCOM.ZS": "cause of death, non-communicable diseases, % of total",
+            "SH.DTH.INJR.ZS": "cause of death, injury, % of total",
+            "SP.DYN.IMRT.IN": "infant mortality rate, per 1,000 live births",
+            "SH.DYN.MORT": "under-5 mortality rate, per 1,000 live births",
+            "SP.DYN.LE00.IN": "life expectancy at birth, years",
+            "SP.DYN.CDRT.IN": "crude death rate, per 1,000 people",
+            "SP.POP.TOTL": "population",
+          }
+          M = {"ok": [], "failed": []}
+          for code, label in IND.items():
+              rows = []
+              try:
+                  page = 1
+                  while True:
+                      r = S.get("https://api.worldbank.org/v2/country/all/indicator/%s" % code,
+                                params={"format": "json", "per_page": 20000, "date": "1960:2026", "page": page}, timeout=120)
+                      j = r.json()
+                      if not isinstance(j, list) or len(j) < 2 or j[1] is None:
+                          break
+                      rows += [{"iso3": x["countryiso3code"], "country": x["country"]["value"], "year": x["date"], "value": x["value"]} for x in j[1] if x["value"] is not None]
+                      if page >= j[0].get("pages", 1):
+                          break
+                      page += 1
+                  json.dump({"code": code, "label": label, "rows": rows}, open("out/wb/%s.json" % code, "w"))
+                  M["ok"].append({"code": code, "rows": len(rows)})
+              except Exception as e:
+                  M["failed"].append({"code": code, "error": repr(e)[:200]})
+              time.sleep(1)
+          json.dump(M, open("out/wb_manifest.json", "w"), indent=1)
+          print(json.dumps(M)[:1500])
+          PY
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/pestilence-wb-data1.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/pestilence-wb-data1.zip
+          git commit -m "Fetch World Bank disease and mortality indicators" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pestilence-wb-data1
+          path: out/
 
