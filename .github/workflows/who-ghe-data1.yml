@@ -1,1 +1,62 @@
+name: who-ghe-data1
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: WHO Global Health Estimates, age-standardized and crude death rates by country and cause, 2000 to 2023
+        continue-on-error: true
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import re, time, urllib.request, urllib.parse
+          UA = {"User-Agent": "Mozilla/5.0 (compatible; KAIM Research info@kaimresearch.com)"}
+          log = open("out/log.txt", "w")
+          def get(u, t=600):
+              for a in range(3):
+                  try:
+                      return urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=t).read()
+                  except Exception as e:
+                      log.write("%s try %d %s\n" % (u[:110], a, repr(e)[:120])); log.flush(); time.sleep(10 * (a + 1))
+          PAGE = "https://www.who.int/data/gho/data/themes/mortality-and-global-health-estimates/ghe-leading-causes-of-death"
+          urls = set()
+          h = get(PAGE)
+          if h:
+              html = h.decode("utf-8", "replace"); open("out/page.html", "w").write(html)
+              for m in re.findall(r'href="([^"]+)"', html):
+                  if re.search(r"global-health-estimates/.*(death-rates|deaths_bycountry_age_sex_(2000|2010|2019|2023)|ghe2023_cod_methods)", m, re.I):
+                      urls.add(urllib.parse.urljoin(PAGE, m.replace("&amp;", "&")))
+          base = "https://cdn.who.int/media/docs/default-source/gho-documents/global-health-estimates/"
+          urls |= {base + "age-standardized-death-rates-2000-2023_bycountry_2026-10-01.xlsx?sfvrsn=1330e53_1",
+                   base + "crude-death-rates-2000-2023_bycountry_2026-10-01.xlsx?sfvrsn=8ccbc771_1"}
+          log.write("urls:\n" + "\n".join(sorted(urls)) + "\n"); log.flush()
+          seen = set()
+          for u in sorted(urls):
+              name = u.split("?")[0].split("/")[-1]
+              if name in seen: continue
+              seen.add(name)
+              b = get(u)
+              if b:
+                  open("out/" + name, "wb").write(b); log.write("saved %s %d\n" % (name, len(b)))
+          log.close()
+          PY
+          python3 q.py
+          cat out/log.txt | head -40
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/who-ghe-data1.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/who-ghe-data1.zip
+          git commit -m "Fetch WHO global health estimates death rates" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: who-ghe-data1
+          path: out/
 
