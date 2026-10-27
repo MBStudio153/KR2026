@@ -1,1 +1,64 @@
+name: shelter-hud-data1
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: "HUD Annual Homeless Assessment Report point-in-time and housing inventory counts"
+        continue-on-error: true
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import re, time, urllib.request, urllib.parse
+          UA={"User-Agent":"Mozilla/5.0 (compatible; KAIM Research info@kaimresearch.com)"}
+          log=open("out/log.txt","w")
+          def get(u,t=300):
+              for a in range(3):
+                  try: return urllib.request.urlopen(urllib.request.Request(u,headers=UA),timeout=t).read()
+                  except Exception as e:
+                      log.write("%s try %d %s\n"%(u[:120],a,repr(e)[:100])); log.flush(); time.sleep(8*(a+1))
+          pages=["https://www.huduser.gov/portal/datasets/ahar.html","https://www.huduser.gov/portal/datasets/ahar/2024-ahar-part-1-pit-estimates-of-homelessness-in-the-us.html","https://www.huduser.gov/portal/node/11318","https://www.huduser.gov/portal/node/9121","https://www.hudexchange.info/resource/3031/pit-and-hic-data-since-2007/","https://www.hudexchange.info/programs/hdx/pit-hic/"]
+          urls=set()
+          for i,p in enumerate(pages):
+              h=get(p)
+              if not h: continue
+              html=h.decode("utf-8","replace"); open("out/page_%d.html"%i,"w").write(html)
+              for m in re.findall(r'href="([^"]+)"',html):
+                  u=urllib.parse.urljoin(p,m.replace("&amp;","&"))
+                  if re.search(r"\.(xlsx?|xlsb|csv|pdf|zip)(\?|$)",u,re.I) and re.search(r"PIT|HIC|AHAR|homeless|Counts",u,re.I): urls.add(u)
+          base="https://www.huduser.gov/portal/sites/default/files/xls/"
+          for y in (2024,2025,2026):
+              for n in ("%d-PIT-Counts-by-State.xlsb","%d-PIT-Counts-by-State.xlsx","%d-PIT-Counts-by-CoC.xlsb","%d-PIT-Counts-by-CoC.xlsx"):
+                  urls.add(base+"2007-"+n%y)
+              urls.add(base+"2011-%d-PIT-Veteran-Counts-by-State.xlsx"%y); urls.add(base+"2007-%d-HIC-Counts-by-State.xlsx"%y)
+          log.write("candidates %d\n"%len(urls)); log.flush()
+          seen=set()
+          for u in sorted(urls):
+              n=u.split("?")[0].split("/")[-1]
+              if n in seen: continue
+              seen.add(n); b=get(u)
+              if b and len(b)>2000 and b[:5].lower()!=b"<html" and not b[:15].lower().startswith(b"<!doctype"):
+                  open("out/"+n,"wb").write(b); log.write("saved %s %d\n"%(n,len(b)))
+              else: log.write("skip %s\n"%n)
+          log.close()
+          PY
+          python3 q.py
+          head -60 out/log.txt
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/shelter-hud-data1.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/shelter-hud-data1.zip
+          git commit -m "Fetch shelter-hud-data1" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shelter-hud-data1
+          path: out/
 
