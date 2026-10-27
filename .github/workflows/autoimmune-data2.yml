@@ -1,1 +1,92 @@
+name: autoimmune-data2
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: WHO Mortality Database, autoimmune and cancer causes by country and year (ICD-10)
+        continue-on-error: true
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import io, os, re, sys, time, zipfile, urllib.request, urllib.parse
+          UA = {"User-Agent": "Mozilla/5.0 (compatible; KAIM Research info@kaimresearch.com)"}
+          log = open("out/log.txt", "w")
+          def get(url, timeout=900):
+              for a in range(3):
+                  try:
+                      return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout)
+                  except Exception as e:
+                      log.write("%s try %d %s\n" % (url, a, repr(e)[:150])); log.flush(); time.sleep(10 * (a + 1))
+              return None
+          PAGE = "https://www.who.int/data/data-collection-tools/who-mortality-database"
+          urls = set()
+          r = get(PAGE)
+          if r:
+              html = r.read().decode("utf-8", "replace")
+              open("out/page.html", "w").write(html)
+              for m in re.findall(r'href="([^"]+)"', html):
+                  if re.search(r"mortality-raw-data|morticd10|pop\.|country_codes|notes", m, re.I) and re.search(r"\.(zip|csv|xlsx?|pdf)", m, re.I):
+                      urls.add(urllib.parse.urljoin(PAGE, m.replace("&amp;", "&")))
+          base = "https://cdn.who.int/media/docs/default-source/world-health-data-platform/mortality-raw-data/"
+          for n in ["morticd10_part1.zip", "morticd10_part2.zip", "morticd10_part3.zip", "morticd10_part4.zip", "morticd10_part5.zip", "pop.zip", "country_codes.zip"]:
+              urls.add(base + n)
+          log.write("candidate urls: %d\n%s\n" % (len(urls), "\n".join(sorted(urls)))); log.flush()
+          # autoimmune ICD-10 groups plus all cancers (C00-C97) and neoplasm summary
+          KEEP = re.compile(r"^(M0[56]|M3[0-6]|G35|E10|K5[01]|L40|L93|K90|G70|E05|E06|D86|C\d\d|1026|1027|1028)", re.I)
+          out = open("out/who_mdb_filtered.csv", "w")
+          wrote_header = False
+          for u in sorted(urls):
+              name = u.split("/")[-1].split("?")[0]
+              if not name.lower().endswith(".zip"):
+                  r = get(u)
+                  if r:
+                      open("out/" + name, "wb").write(r.read()); log.write("saved %s\n" % name)
+                  continue
+              r = get(u)
+              if not r:
+                  continue
+              data = r.read(); log.write("%s bytes=%d\n" % (name, len(data))); log.flush()
+              if name.lower().startswith(("pop", "country")):
+                  open("out/" + name, "wb").write(data); continue
+              try:
+                  z = zipfile.ZipFile(io.BytesIO(data))
+              except Exception as e:
+                  log.write("bad zip %s %s\n" % (name, e)); continue
+              for member in z.namelist():
+                  with z.open(member) as f:
+                      header = f.readline().decode("utf-8", "replace")
+                      cols = [c.strip().strip('"') for c in header.rstrip("\n\r").split(",")]
+                      if "Cause" not in cols:
+                          log.write("skip %s columns %s\n" % (member, cols[:8])); continue
+                      ci = cols.index("Cause"); n = 0
+                      if not wrote_header:
+                          out.write(header); wrote_header = True
+                      for line in f:
+                          s = line.decode("utf-8", "replace")
+                          parts = s.split(",", ci + 1)
+                          if len(parts) > ci and KEEP.match(parts[ci].strip().strip('"')):
+                              out.write(s); n += 1
+                      log.write("%s kept %d rows\n" % (member, n)); log.flush()
+          out.close(); log.close()
+          PY
+          python3 q.py
+          cat out/log.txt | head -60
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/autoimmune-data2.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/autoimmune-data2.zip
+          git commit -m "Fetch WHO mortality database autoimmune and cancer" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: autoimmune-data2
+          path: out/
 
