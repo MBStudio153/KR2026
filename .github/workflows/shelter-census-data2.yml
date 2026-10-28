@@ -1,1 +1,52 @@
+name: shelter-census-data2
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Census ACS 1-year crowding, household size, rent burden, tenure and vacancy, US and states"
+        continue-on-error: true
+        env:
+          CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import os, json, time, requests
+          key=(os.environ.get("CENSUS_API_KEY") or "").strip()
+          log=open("out/log.txt","w")
+          G=["NAME","B25014_001E","B25014_002E","B25014_005E","B25014_006E","B25014_007E","B25014_008E","B25014_011E","B25014_012E","B25014_013E","B25010_001E","B25010_002E","B25010_003E","B25070_001E","B25070_007E","B25070_008E","B25070_009E","B25070_010E","B25003_001E","B25003_002E","B25003_003E","B25002_001E","B25002_002E","B25002_003E"]
+          res={}
+          for yr in range(2005,2026):
+              for geo in ("us:*","state:*"):
+                  for a in range(3):
+                      try:
+                          r=requests.get("https://api.census.gov/data/%d/acs/acs1"%yr,params=dict({"get":",".join(G),"for":geo},**({"key":key} if key else {})),timeout=90)
+                          if r.status_code==200:
+                              res["%d_%s"%(yr,geo.split(":")[0])]=r.json(); log.write("ok %d %s rows=%d\n"%(yr,geo,len(r.json())-1)); break
+                          log.write("%d %s HTTP %d %s\n"%(yr,geo,r.status_code,r.text[:80]))
+                          if r.status_code in (204,400,404): break
+                      except Exception as e: log.write("%d %s %s\n"%(yr,geo,repr(e)[:100]))
+                      time.sleep(4)
+                  time.sleep(0.5)
+          json.dump(res,open("out/acs_shelter.json","w")); log.close()
+          PY
+          python3 q.py
+          head -60 out/log.txt
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/shelter-census-data2.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/shelter-census-data2.zip
+          git commit -m "Fetch shelter-census-data2" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shelter-census-data2
+          path: out/
 
