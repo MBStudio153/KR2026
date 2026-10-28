@@ -1,1 +1,54 @@
+name: shelter-census-data3c
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Census ACS 1-year housing tables, range(2021,2026)"
+        continue-on-error: true
+        env:
+          CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
+        run: |
+          mkdir -p out data/zips
+          cat > q.py <<'PY'
+          import os, json, time, requests
+          key=(os.environ.get("CENSUS_API_KEY") or "").strip()
+          log=open("out/log.txt","w")
+          log.write("key present: %s\n"%bool(key))
+          G=["NAME","B25014_001E","B25014_002E","B25014_005E","B25014_006E","B25014_007E","B25014_008E","B25014_011E","B25014_012E","B25014_013E","B25010_001E","B25070_001E","B25070_007E","B25070_008E","B25070_009E","B25070_010E","B25003_001E","B25003_002E","B25003_003E","B25002_001E","B25002_002E","B25002_003E"]
+          res={}
+          for yr in range(2021,2026):
+              for geo in ("us:*","state:*"):
+                  for a in range(3):
+                      try:
+                          r=requests.get("https://api.census.gov/data/%d/acs/acs1"%yr,params=dict({"get":",".join(G),"for":geo},**({"key":key} if key else {})),headers={"User-Agent":"Mozilla/5.0 (KAIM Research data pull; info@kaimresearch.com)","Accept":"application/json"},timeout=90)
+                          try:
+                              j=r.json(); res["%d_%s"%(yr,geo.split(":")[0])]=j; log.write("ok %d %s rows=%d\n"%(yr,geo,len(j)-1)); break
+                          except Exception:
+                              log.write("%d %s HTTP %d ct=%s body=%r\n"%(yr,geo,r.status_code,r.headers.get("content-type"),r.text[:200]))
+                              if r.status_code in (204,400,404): break
+                      except Exception as e: log.write("%d %s %s\n"%(yr,geo,repr(e)[:100]))
+                      time.sleep(4)
+                  time.sleep(0.5)
+          json.dump(res,open("out/acs_shelter.json","w")); log.close()
+          PY
+          python3 q.py
+          head -60 out/log.txt
+      - name: Zip and commit
+        if: always()
+        run: |
+          cd out && zip -r ../data/zips/shelter-census-data3c.zip . && cd ..
+          git config user.name "github-actions"; git config user.email "actions@users.noreply.github.com"
+          git add data/zips/shelter-census-data3c.zip
+          git commit -m "Fetch shelter-census-data3c" || true
+          git push || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shelter-census-data3c
+          path: out/
 
