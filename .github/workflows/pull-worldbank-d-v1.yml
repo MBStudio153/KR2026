@@ -1,1 +1,137 @@
+name: Pull World Bank bond press releases with issue price (run D)
+on:
+  workflow_dispatch:
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Pull
+        run: |
+          pip install requests pandas lxml html5lib
+          cat > wb.py <<'KAIMEOF'
+
+          import os, re, csv, json, time, zipfile, sys, requests
+          OUT="out"; os.makedirs(OUT,exist_ok=True); lg=open(OUT+"/log.txt","w")
+          def P(*a):
+              s=" ".join(map(str,a)); print(s,flush=True); lg.write(s+"\n"); lg.flush()
+          S=requests.Session(); S.headers.update({"User-Agent":"Mozilla/5.0 (KAIM Research LLC info@kaimresearch.com)"})
+          def get(url,t=120,**kw):
+              for k in range(3):
+                  try:
+                      r=S.get(url,timeout=t,**kw)
+                      if r.status_code in (429,500,502,503,504): time.sleep(5*(k+1)); continue
+                      return r
+                  except Exception as e:
+                      P("retry",k+1,url[:100],type(e).__name__); time.sleep(3)
+              return None
+          API="https://datacatalogapi.worldbank.org/dexapps/fone/api/apiservice"
+          def scan(ds):
+              r=get(f"https://financesone.worldbank.org/api-explorer?id={ds}")
+              if r is None or r.status_code!=200:
+                  P(ds,"explorer",None if r is None else r.status_code); return None,[]
+              t=r.text; title=re.search(r"<title>(.*?)</title>",t,re.S); rs=sorted(set(re.findall(r"RS\d{5}",t)))
+              open(f"{OUT}/explorer_{ds}.html","w",encoding="utf-8").write(t[:300000])
+              P(ds,"explorer ok",len(t),"title",(title.group(1).strip()[:80] if title else None),"RS",rs)
+              return t,rs
+          def rows_of(j):
+              if isinstance(j,list): return j
+              if isinstance(j,dict):
+                  for k in ("data","Data","rows","value","results"):
+                      if isinstance(j.get(k),list): return j[k]
+              return []
+          def fetch(ds,rs,cap=400,top=1000):
+              allr=[]; skip=0; first=True
+              for pg in range(cap):
+                  r=get(API,params={"datasetId":ds,"resourceId":rs,"top":top,"skip":skip,"type":"json"},t=300)
+                  if r is None or r.status_code!=200:
+                      P(ds,rs,"api",None if r is None else r.status_code); break
+                  try: j=r.json()
+                  except Exception: P(ds,rs,"not json",r.text[:150]); break
+                  if first:
+                      open(f"{OUT}/sample_{ds}_{rs}.json","w",encoding="utf-8").write(json.dumps(j)[:4000]); first=False
+                  rows=rows_of(j)
+                  if not rows: P(ds,rs,"no rows page",pg, str(j)[:200]); break
+                  allr+=rows; skip+=top
+                  if len(rows)<top: break
+              P(ds,rs,"rows",len(allr))
+              if allr:
+                  keys=[]
+                  for x in allr[:50]:
+                      for k in x:
+                          if k not in keys: keys.append(k)
+                  with open(f"{OUT}/{ds}_{rs}.csv","w",newline="",encoding="utf-8") as f:
+                      w=csv.DictWriter(f,fieldnames=keys,extrasaction="ignore"); w.writeheader(); w.writerows(allr)
+              return len(allr)
+          def dataset(ds,known_rs=None,cap=400):
+              t,rs=scan(ds)
+              cands=([known_rs] if known_rs else [])+[x for x in rs if x!=known_rs]
+              for x in cands:
+                  n=fetch(ds,x,cap=cap)
+                  if n: return
+          def pages(pairs):
+              import pandas as pd, io
+              for nm,u in pairs:
+                  r=get(u,t=180); P(nm,None if r is None else (r.status_code,len(r.content)))
+                  if r is None or r.status_code!=200: continue
+                  open(f"{OUT}/{nm}.html","wb").write(r.content)
+                  try:
+                      tabs=pd.read_html(io.StringIO(r.text))
+                      for i,tb in enumerate(tabs): tb.to_csv(f"{OUT}/{nm}_table{i}.csv",index=False)
+                      P(nm,"tables",len(tabs),[tb.shape for tb in tabs][:8])
+                  except Exception as e: P(nm,"no tables",type(e).__name__)
+                  links=re.findall(r'href="([^"]+\.(?:xlsx|xls|csv|pdf))"',r.text,re.I)
+                  open(f"{OUT}/{nm}_links.txt","w").write("\n".join(sorted(set(links))))
+
+          import io, pandas as pd
+          urls={}
+          for q in ("prices bond","prices benchmark","launches bond","sustainable development bond","global bond"):
+              for off in range(0,2000,100):
+                  r=get("https://search.worldbank.org/api/v2/news",params={"format":"json","qterm":q,"rows":100,"os":off,"lang_exact":"English"})
+                  if r is None or r.status_code!=200: P("news api",q,off,None if r is None else r.status_code); break
+                  try: j=r.json()
+                  except Exception: P("news not json",r.text[:120]); break
+                  docs=j.get("documents",{}) 
+                  n=0
+                  for k,v in docs.items():
+                      if not isinstance(v,dict): continue
+                      u=v.get("url") or v.get("url_friendly_title") or ""
+                      t=(v.get("title") or {}).get("cdata!") if isinstance(v.get("title"),dict) else v.get("title")
+                      if u and re.search(r"bond|note",(t or ""),re.I): urls[u]=t; n+=1
+                  P("news",q,off,"docs",len(docs),"kept",n)
+                  if len(docs)<100: break
+          P("candidate releases",len(urls))
+          open(OUT+"/press_release_urls.csv","w",encoding="utf-8").write("\n".join(f"{u},{(t or '').replace(',',' ')}" for u,t in urls.items()))
+          pat={"coupon":r"coupon[^.]{0,60}?(\d+\.\d+)\s*%","issue_price":r"(?:issue|re-?offer) price[^.]{0,40}?(\d+\.\d+)\s*%?","issue_yield":r"(?:issue|re-?offer) yield[^.]{0,40}?(\d+\.\d+)\s*%","spread_ust":r"spread of ([\d.]+) basis points (?:versus|over|to)[^.]{0,30}Treasur","isin":r"\b([A-Z]{2}[A-Z0-9]{9}\d)\b","maturity":r"matur[^.]{0,60}?((?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4})","settle":r"settle[^.]{0,60}?((?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4})","amount":r"((?:USD|EUR|GBP|AUD|CAD|NOK|SEK|JPY|CHF|NZD|ZAR|TRY|MXN|BRL) ?[\d.,]+ (?:billion|million))"}
+          rows=[]
+          for i,(u,t) in enumerate(urls.items()):
+              uu=u if u.startswith("http") else "https://www.worldbank.org"+u
+              r=get(uu,t=60)
+              if r is None or r.status_code!=200: continue
+              txt=re.sub(r"\s+"," ",re.sub(r"<[^>]+>"," ",r.text))
+              row={"url":uu,"title":t}
+              for k,p in pat.items():
+                  m=re.search(p,txt,re.I); row[k]=m.group(1) if m else ""
+              row["date"]=(re.search(r"/(\d{4}/\d{2}/\d{2})/",uu) or [None,""])[1]
+              rows.append(row)
+              if i%50==0: P("fetched",i,"of",len(urls))
+              time.sleep(0.3)
+          if rows:
+              import csv as _c
+              with open(OUT+"/bond_press_releases_parsed.csv","w",newline="",encoding="utf-8") as f:
+                  w=_c.DictWriter(f,fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
+          P("parsed",len(rows),"with issue price",sum(1 for r in rows if r["issue_price"]))
+
+          lg.close()
+          with zipfile.ZipFile("wb_d.zip","w",zipfile.ZIP_DEFLATED) as z:
+              for f in sorted(os.listdir(OUT)): z.write(os.path.join(OUT,f),f)
+          print("zip done")
+
+          KAIMEOF
+          python wb.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wb_d
+          path: wb_d.zip
 
