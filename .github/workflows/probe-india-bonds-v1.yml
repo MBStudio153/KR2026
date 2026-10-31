@@ -1,1 +1,62 @@
+name: Probe India government bond data
+on:
+  workflow_dispatch:
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Pull
+        run: |
+          pip install requests pandas lxml html5lib openpyxl
+          cat > p.py <<'KAIMEOF'
+          import os, re, io, json, time, zipfile, requests
+          OUT="out"; os.makedirs(OUT,exist_ok=True); lg=open(OUT+"/log.txt","w")
+          def P(*a):
+              s=" ".join(map(str,a)); print(s,flush=True); lg.write(s+"\n"); lg.flush()
+          S=requests.Session(); S.headers.update({"User-Agent":"Mozilla/5.0 (KAIM Research LLC info@kaimresearch.com)"})
+          def get(u,t=120,**kw):
+              for k in range(3):
+                  try:
+                      r=S.get(u,timeout=t,**kw)
+                      if r.status_code in (429,500,502,503,504): time.sleep(5*(k+1)); continue
+                      return r
+                  except Exception as e:
+                      P("retry",k+1,u[:100],type(e).__name__); time.sleep(3)
+              return None
+          URLS=[('rbi_dbie', 'https://data.rbi.org.in/DBIE/'), ('rbi_wss', 'https://www.rbi.org.in/Scripts/WSSView.aspx'), ('rbi_pubs', 'https://www.rbi.org.in/Scripts/Statistics.aspx'), ('rbi_gsec_auctions', 'https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx'), ('ccil_home', 'https://www.ccilindia.com/'), ('ccil_debt', 'https://www.ccilindia.com/web/ccil/gsec'), ('fbil_home', 'https://www.fbil.org.in/'), ('fbil_gsec', 'https://www.fbil.org.in/#/gsecs'), ('dea_debt', 'https://dea.gov.in/status-paper'), ('indiabudget_debt', 'https://www.indiabudget.gov.in/'), ('cgdata_debt', 'https://cag.gov.in/en'), ('bis_in_dss', 'https://data.bis.org/topics/DEBT_SEC2'), ('wb_wdi_in_debt', 'https://api.worldbank.org/v2/country/IND/indicator/GC.DOD.TOTL.GD.ZS?format=json&per_page=100'), ('wb_wdi_in_extdebt', 'https://api.worldbank.org/v2/country/IND/indicator/DT.DOD.DECT.CD?format=json&per_page=100'), ('imf_in_debt', 'https://www.imf.org/external/datamapper/api/v1/GGXWDG_NGDP/IND'), ('fred_in_gsec10y', 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=INDIRLTLT01STM'), ('datagov_in', 'https://data.gov.in/search?title=government%20securities')]
+          for nm,u in URLS:
+              r=get(u,t=180)
+              if r is None: P(nm,"no response"); continue
+              ct=r.headers.get("content-type","")
+              P(nm,r.status_code,ct,len(r.content),u)
+              if r.status_code!=200: continue
+              big=len(r.content)>25_000_000
+              ext=".zip" if "zip" in ct or u.endswith(".zip") else ".csv" if u.endswith(".csv") else ".json" if "json" in ct else ".xlsx" if u.endswith(".xlsx") else ".html"
+              if big:
+                  open(f"{OUT}/{nm}_HEAD{ext}","wb").write(r.content[:2_000_000]); P(nm,"large, saved first 2MB only")
+              else:
+                  open(f"{OUT}/{nm}{ext}","wb").write(r.content)
+              if ext==".html":
+                  links=sorted(set(re.findall(r'href="([^"]+\.(?:xlsx|xls|csv|zip|pdf|json))"',r.text,re.I)))
+                  open(f"{OUT}/{nm}_links.txt","w").write("\n".join(links)); P(nm,"links",len(links))
+                  try:
+                      import pandas as pd
+                      tabs=pd.read_html(io.StringIO(r.text))
+                      for i,tb in enumerate(tabs[:20]): tb.to_csv(f"{OUT}/{nm}_table{i}.csv",index=False)
+                      P(nm,"tables",len(tabs))
+                  except Exception as e: P(nm,"no tables",type(e).__name__)
+
+          lg.close()
+          with zipfile.ZipFile("indiabonds.zip","w",zipfile.ZIP_DEFLATED) as z:
+              for f in sorted(os.listdir(OUT)): z.write(os.path.join(OUT,f),f)
+          print("zip done")
+
+          KAIMEOF
+          python p.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: indiabonds
+          path: indiabonds.zip
 
