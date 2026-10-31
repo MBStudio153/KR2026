@@ -1,1 +1,113 @@
+name: Pull BIS global debt securities statistics (run E)
+on:
+  workflow_dispatch:
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Pull
+        run: |
+          pip install requests pandas lxml html5lib
+          cat > wb.py <<'KAIMEOF'
+
+          import os, re, csv, json, time, zipfile, sys, requests
+          OUT="out"; os.makedirs(OUT,exist_ok=True); lg=open(OUT+"/log.txt","w")
+          def P(*a):
+              s=" ".join(map(str,a)); print(s,flush=True); lg.write(s+"\n"); lg.flush()
+          S=requests.Session(); S.headers.update({"User-Agent":"Mozilla/5.0 (KAIM Research LLC info@kaimresearch.com)"})
+          def get(url,t=120,**kw):
+              for k in range(3):
+                  try:
+                      r=S.get(url,timeout=t,**kw)
+                      if r.status_code in (429,500,502,503,504): time.sleep(5*(k+1)); continue
+                      return r
+                  except Exception as e:
+                      P("retry",k+1,url[:100],type(e).__name__); time.sleep(3)
+              return None
+          API="https://datacatalogapi.worldbank.org/dexapps/fone/api/apiservice"
+          def scan(ds):
+              r=get(f"https://financesone.worldbank.org/api-explorer?id={ds}")
+              if r is None or r.status_code!=200:
+                  P(ds,"explorer",None if r is None else r.status_code); return None,[]
+              t=r.text; title=re.search(r"<title>(.*?)</title>",t,re.S); rs=sorted(set(re.findall(r"RS\d{5}",t)))
+              open(f"{OUT}/explorer_{ds}.html","w",encoding="utf-8").write(t[:300000])
+              P(ds,"explorer ok",len(t),"title",(title.group(1).strip()[:80] if title else None),"RS",rs)
+              return t,rs
+          def rows_of(j):
+              if isinstance(j,list): return j
+              if isinstance(j,dict):
+                  for k in ("data","Data","rows","value","results"):
+                      if isinstance(j.get(k),list): return j[k]
+              return []
+          def fetch(ds,rs,cap=400,top=1000):
+              allr=[]; skip=0; first=True
+              for pg in range(cap):
+                  r=get(API,params={"datasetId":ds,"resourceId":rs,"top":top,"skip":skip,"type":"json"},t=300)
+                  if r is None or r.status_code!=200:
+                      P(ds,rs,"api",None if r is None else r.status_code); break
+                  try: j=r.json()
+                  except Exception: P(ds,rs,"not json",r.text[:150]); break
+                  if first:
+                      open(f"{OUT}/sample_{ds}_{rs}.json","w",encoding="utf-8").write(json.dumps(j)[:4000]); first=False
+                  rows=rows_of(j)
+                  if not rows: P(ds,rs,"no rows page",pg, str(j)[:200]); break
+                  allr+=rows; skip+=top
+                  if len(rows)<top: break
+              P(ds,rs,"rows",len(allr))
+              if allr:
+                  keys=[]
+                  for x in allr[:50]:
+                      for k in x:
+                          if k not in keys: keys.append(k)
+                  with open(f"{OUT}/{ds}_{rs}.csv","w",newline="",encoding="utf-8") as f:
+                      w=csv.DictWriter(f,fieldnames=keys,extrasaction="ignore"); w.writeheader(); w.writerows(allr)
+              return len(allr)
+          def dataset(ds,known_rs=None,cap=400):
+              t,rs=scan(ds)
+              cands=([known_rs] if known_rs else [])+[x for x in rs if x!=known_rs]
+              for x in cands:
+                  n=fetch(ds,x,cap=cap)
+                  if n: return
+          def pages(pairs):
+              import pandas as pd, io
+              for nm,u in pairs:
+                  r=get(u,t=180); P(nm,None if r is None else (r.status_code,len(r.content)))
+                  if r is None or r.status_code!=200: continue
+                  open(f"{OUT}/{nm}.html","wb").write(r.content)
+                  try:
+                      tabs=pd.read_html(io.StringIO(r.text))
+                      for i,tb in enumerate(tabs): tb.to_csv(f"{OUT}/{nm}_table{i}.csv",index=False)
+                      P(nm,"tables",len(tabs),[tb.shape for tb in tabs][:8])
+                  except Exception as e: P(nm,"no tables",type(e).__name__)
+                  links=re.findall(r'href="([^"]+\.(?:xlsx|xls|csv|pdf))"',r.text,re.I)
+                  open(f"{OUT}/{nm}_links.txt","w").write("\n".join(sorted(set(links))))
+
+          cands=["https://data.bis.org/static/bulk/WS_DEBT_SEC2_PUB_csv_flat.zip","https://data.bis.org/static/bulk/WS_DEBT_SEC2_PUB_csv_col.zip",
+                 "https://data.bis.org/static/bulk/WS_NA_SEC_DSS_csv_flat.zip","https://www.bis.org/statistics/full_debt_sec2_csv.zip","https://data.bis.org/static/bulk/WS_CBPOL_csv_flat.zip"]
+          for u in cands:
+              r=get(u,t=600); P(u,None if r is None else (r.status_code,len(r.content)))
+              if r is not None and r.status_code==200 and len(r.content)>10000:
+                  open(OUT+"/"+u.split("/")[-1],"wb").write(r.content)
+          r=get("https://data.bis.org/topics/DSS",t=60); P("bis topic page",None if r is None else (r.status_code,len(r.content)))
+          if r is not None and r.status_code==200:
+              open(OUT+"/bis_dss_topic.html","w",encoding="utf-8").write(r.text[:300000])
+              P("bulk links",sorted(set(re.findall(r'[^"\s]*bulk[^"\s]*\.zip',r.text)))[:20])
+          r=get("https://data.bis.org/bulkdownload",t=60); P("bis bulk page",None if r is None else (r.status_code,len(r.content)))
+          if r is not None and r.status_code==200:
+              open(OUT+"/bis_bulk.html","w",encoding="utf-8").write(r.text[:300000])
+              P("zip links",sorted(set(re.findall(r'[^"\s]*\.zip',r.text)))[:60])
+
+          lg.close()
+          with zipfile.ZipFile("wb_e.zip","w",zipfile.ZIP_DEFLATED) as z:
+              for f in sorted(os.listdir(OUT)): z.write(os.path.join(OUT,f),f)
+          print("zip done")
+
+          KAIMEOF
+          python wb.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wb_e
+          path: wb_e.zip
 
